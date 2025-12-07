@@ -1,0 +1,602 @@
+---
+title: "FinalProject-SURV727"
+authot: "Jianing Zou"
+format: pdf
+editor: visual
+---
+
+```{r}
+
+library(rvest)
+library(dplyr)
+library(RedditExtractoR)
+library(quanteda)
+library(quanteda.textstats)
+library(tidyverse)
+library(lubridate)
+library(topicmodels)
+library(tidytext)
+library(tidyverse)
+library(httr)
+library(jsonlite)
+library(purrr)
+library(LDAvis)
+library(text)
+library(httr)
+library(jsonlite)
+library(scales)
+```
+
+```{r}
+
+
+
+hiphop_reddit <- read.csv("hiphop_reddit.csv", stringsAsFactors = FALSE)
+
+# Extract the first column (subreddit names)
+subreddits <- hiphop_reddit[[1]]
+
+
+```
+
+```{r}
+
+
+
+
+
+get_subreddit_stats <- function(sub) {
+  url <- paste0("https://www.reddit.com/r/", sub, "/about.json")
+  
+  res <- GET(url, add_headers(`User-Agent` = "r-research-bot by lunazou2403@outlook.com"))
+  stop_for_status(res)
+  data <- fromJSON(content(res, as = "text", encoding = "UTF-8"))
+  
+  tibble(
+    subreddit = sub,
+    subscribers = data$data$subscribers,
+    active_users = data$data$active_user_count %||% NA_integer_
+  )
+}
+
+stats_df <- map_dfr(subreddits, possibly(get_subreddit_stats, otherwise = tibble()))
+
+stats_df
+
+write_csv(stats_df, "stats_df.csv")
+
+
+```
+
+```{r}
+
+scale_y_continuous(labels = scales::label_number(scale_cut = scales::cut_si(" ")))
+geom_text(aes(label = comma(subscribers)), hjust = -0.1)
+
+
+ggplot(stats_df,
+       aes(x = reorder(subreddit, subscribers), y = subscribers)) +
+  geom_col(fill = "skyblue3") +
+  
+  # Use label_number + cut_si for 1 M, 800 K, etc.
+  geom_text(aes(label = scales::label_number(scale_cut = scales::cut_si(" "))(subscribers)),
+            hjust = -0.1, size = 3.5) +
+  
+  coord_flip() +
+  scale_y_continuous(
+    labels = scales::label_number(scale_cut = scales::cut_si(" ")),
+    expand = expansion(mult = c(0, 0.1))
+  ) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Subscribers per Subreddit",
+    x = "Subreddit",
+    y = "Subscribers"
+  )
+
+ggsave("subscribers.pdf", plot = last_plot(), width = 8, height = 6)
+
+
+information <- stats_df %>%
+  summarise(
+    max_sub = max(subscribers),
+    mean_sub = mean(subscribers),
+    min_sub = min(subscribers),
+    median_sub = median(subscribers)
+  )
+information
+
+stats_df
+
+```
+
+Choose $$N \sim \text{Poisson}(\xi)$$
+Choose $$\boldsymbol{\theta} \sim \text{Dir}(\boldsymbol{\alpha})$$
+For each of the $$N$$ words $$w_n$$:
+Choose a topic $$z_n \sim \text{Multinomial}(\boldsymbol{\theta})$$.
+Choose a word $$w_n$$ from $$p(w_n \mid z_n, \boldsymbol{\beta})$$, a multinomial probability conditioned on the topic $$z_n$$.
+
+
+
+```{r}
+
+
+nett <- map(
+  subreddits,
+  ~ find_thread_urls(
+      subreddit = .x,
+      keywords = "nettspend",
+      sort_by = "top",
+      period = "year"
+    )
+)
+
+names(nett) <- subreddits
+
+
+
+
+```
+
+
+```{r}
+
+
+
+all_threads <- map2_df(
+  .x = nett,          # each element: vector of URLs for a subreddit
+  .y = names(nett),   # the subreddit names
+  ~ tibble(
+      subreddit = .y,    # repeat subreddit name for all URLs in this element
+      url       = .x     # the URLs themselves
+    )
+)
+
+head(all_threads)
+
+all_threads <- all_threads %>%
+  mutate(
+    full = paste(url$title, url$text)
+  )
+
+write.csv(all_threads, "all_threads.csv", row.names = FALSE)
+
+tit_text <- all_threads$full
+write.csv(tit_text, "tit_text.csv", row.names = FALSE)
+
+```
+
+```{r}
+
+
+post_counts <- all_threads %>%
+  count(subreddit, name = "num_posts")
+
+post_counts
+
+```
+```{r}
+
+post_counts %>%
+  arrange(desc(num_posts)) %>%                 # sort descending
+  ggplot(aes(x = reorder(subreddit, num_posts), 
+             y = num_posts)) +
+  geom_col(fill = "lightblue") +
+  
+  # add labels for exact counts
+  geom_text(aes(label = num_posts),
+            hjust = -0.2, size = 4) +
+  
+  coord_flip() +
+  theme_minimal(base_size = 14) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  
+  labs(
+    title = "Posts per Subreddit",
+    x = "Subreddit",
+    y = "Post Count"
+  )
+
+ggsave("myplot.pdf", plot = last_plot(), width = 8, height = 6)
+
+```
+
+```{r}
+
+
+# merge the two tables
+df <- post_counts %>%
+inner_join(stats_df, by = "subreddit") %>%
+arrange(desc(num_posts))
+# scale subscribers for plotting
+max_posts <- max(df$num_posts)
+max_subs  <- max(df$subscribers)
+df$subscribers_scaled <- df$subscribers / max_subs * max_posts
+
+
+
+```
+
+```{r}
+
+df$subscribers_scaled <- df$subscribers / max_subs * max_posts
+
+ggplot(df, aes(x = reorder(subreddit, subscribers_scaled))) +
+  
+  # Posts (bars)
+  geom_col(aes(y = subscribers_scaled), fill = "lightblue") +
+  
+  # Subscribers (line)
+  geom_line(aes(y = num_posts, group = 1),
+            color = "darkgreen", size = 1.2) +
+  geom_point(aes(y = num_posts),
+             color = "darkgreen", size = 3) +
+  
+  # Axes with corrected label formatting
+  scale_y_continuous(
+    name = "Post Count",
+    sec.axis = sec_axis(
+      ~ . / max_posts * max_subs,
+      name = "Subscribers",
+      labels = scales::label_number(scale_cut = scales::cut_si(" "))
+    )
+  ) +
+  
+  coord_flip() +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Posts vs. Subscribers of Hip-Hop Subreddits",
+    x = "Subreddit",
+    y = "Post Count"
+  )
+
+ggsave("both.pdf", plot = last_plot(), width = 8, height = 6)
+
+```
+
+
+```{r}
+
+T_corpus <- corpus(tit_text)
+T_corpus
+
+```
+
+
+
+```{r}
+
+T_tokens <- tokens(T_corpus, what = c("word"))
+
+
+T_tokens_cleaned <- T_tokens %>%
+                    tokens_tolower() %>%
+                    tokens(remove_punct = TRUE) %>%
+                    tokens_remove(stopwords("en")) %>%
+                    tokens_wordstem(language = "en")
+T_tokens
+T_tokens_cleaned  
+
+# Lemmatization 
+lemmaData <- read.csv("baseform_en.tsv", # downloaded from https://github.com/tm4ss/tm4ss.github.io/tree/master/resources
+                       sep=",", 
+                       header=FALSE, 
+                       encoding = "UTF-8", 
+                       stringsAsFactors = F)
+
+T_lemm <-  tokens_replace(T_tokens_cleaned  , # "Substitute token types based on vectorized one-to-one matching"
+                                    lemmaData$V1, 
+                                    lemmaData$V2,
+                                    valuetype = "fixed") 
+
+T_lemm  <- T_lemm  %>% tokens_ngrams(1) 
+
+
+```
+
+
+```{r}
+T_DFM <- dfm(T_lemm) 
+cat("\nInitial sparsity: \n")
+dim(T_DFM)
+
+sel_idx <- rowSums(T_DFM) > 0
+T_DFM <- T_DFM[sel_idx, ]
+tit_text <- tit_text[sel_idx]
+
+```
+
+
+```{r}
+K <- 4
+# Set seed to make results reproducible
+set.seed(9161)
+topicModel <- LDA(T_DFM, 
+                  K, 
+                  method="Gibbs", #Uses collapsed Gibbs sampling, a Bayesian iterative method for topic inference
+                  control=list(iter = 500, 
+                               verbose = 25)) #Print progress messages every 25 iterations.
+
+
+
+
+```
+
+
+
+```{r}
+
+
+tmResult <- posterior(topicModel)
+
+
+# Topics are distributions over the entire vocabulary
+
+beta <- tmResult$terms
+glimpse(beta)            
+
+# Each doc has a distribution over k topics
+
+theta <- tmResult$topics
+glimpse(theta)               
+
+terms(topicModel, 30)
+
+# Top terms per topic. Use top 5 to interpret topics
+top5termsPerTopic <- terms(topicModel, 
+                           5)
+# For the next steps, we want to give the topics more descriptive names than just numbers. Therefore, we simply concatenate the five most likely terms of each topic to a string that represents a pseudo-name for each topic.
+
+topicNames <- apply(top5termsPerTopic, 
+                    2, 
+                    paste, 
+                    collapse=" ")
+
+
+
+```
+
+```{r}
+
+# Overall term frequencies across the full corpus
+term_frequency <- colSums(as.matrix(T_DFM))
+
+# Convert to a tidy data frame
+term_frequency_df <- data.frame(
+  term = names(term_frequency),
+  freq = as.numeric(term_frequency),
+  row.names = NULL
+)
+
+top5termsPerTopic <- terms(topicModel, 5)
+
+
+top_terms_df <- lapply(1:K, function(topic){
+  # beta values for this topic
+  beta_topic <- beta[topic, ]
+  
+  # get top 5 terms
+  top_terms <- sort(beta_topic, decreasing = TRUE)[1:5]
+  
+  tibble(
+    topic = topic,
+    term = names(top_terms),
+    beta = as.numeric(top_terms)
+  )
+}) %>% bind_rows()
+
+
+top_terms_with_freq <- top_terms_df %>%
+  left_join(term_frequency_df, by = "term") %>%
+  arrange(topic, desc(beta))
+
+top_terms_with_freq
+
+term_frequency_df %>%
+  arrange(desc(freq))
+  
+
+```
+
+
+```{r}
+
+
+topicProportions <- colSums(theta) / nrow(T_DFM)  # average probability over all paragraphs
+names(topicProportions) <- topicNames     # Topic Names
+sort(topicProportions, decreasing = TRUE) # sort
+
+
+
+```
+
+```{r}
+
+# 1. topic–term matrix
+phi <- posterior(topicModel)$terms   # matrix: topics x terms
+
+# 2. document–topic matrix
+theta <- posterior(topicModel)$topics
+
+# 3. vocabulary
+vocab <- colnames(T_DFM)
+
+# 4. document lengths
+doc_length <- rowSums(as.matrix(T_DFM))
+
+# 5. term frequencies
+term_frequency <- colSums(as.matrix(T_DFM))
+
+
+
+```
+
+```{r}
+json_lda <- createJSON(
+  phi           = phi,
+  theta         = theta,
+  vocab         = vocab,
+  doc.length    = doc_length,
+  term.frequency = term_frequency
+)
+
+serVis(json_lda,
+       open.browser = TRUE)
+
+serVis(
+  json_lda,
+  out.dir      = "lda_vis",
+  open.browser = TRUE,
+  as.gist      = FALSE
+)
+
+servr::httw("lda_vis", browser = TRUE)
+```
+
+# Sentiment Analysis
+
+```{r}
+
+if(!require('reticulate')) install.packages("reticulate")
+library(reticulate)
+
+# If miniconda is not installed yet.
+# install_miniconda()
+
+
+```
+
+```{r}
+
+if (!requireNamespace("devtools", quietly = TRUE)) install.packages("devtools")
+if(!require('huggingfaceR')) devtools::install_github("farach/huggingfaceR")
+
+library(huggingfaceR)
+library(tidyverse)
+
+
+```
+
+```{r}
+
+tit_df <- data.frame(
+  doc_id = seq_along(tit_text),
+  text = tit_text,
+  stringsAsFactors = FALSE
+)
+
+emotion_distilroBERTa <- hf_load_pipeline(
+  model_id = "j-hartmann/emotion-english-distilroberta-base", 
+  task = "text-classification"
+  )
+
+
+```
+
+```{r}
+
+text_length <- nchar(tit_df)
+
+text_len_chars <- nchar(tit_df$text)
+keep_idx <- text_len_chars < 1000   
+
+tit_df_short <- tit_df[keep_idx, ]
+
+emotion_results <- emotion_distilroBERTa(tit_df_short$text)
+
+emotion_results_df <- bind_rows(emotion_results)
+
+```
+
+
+```{r}
+
+ggplot(emotion_results_df, aes(x = label)) +
+  geom_bar(fill = "steelblue") +
+  theme_minimal() +
+  labs(title = "Emotion Counts",
+       x = "Emotion",
+       y = "Number of Documents")
+
+ggsave("counts_sentiment.pdf", plot = last_plot(), width = 8, height = 6)
+```
+
+```{r}
+
+emotion_results_df %>%
+  group_by(label) %>%
+  summarise(mean_score = mean(score)) %>%
+  ggplot(aes(x = reorder(label, mean_score), y = mean_score, fill = label)) +
+  geom_col() +
+  scale_fill_brewer(palette = "Set3") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Average Emotion Confidence",
+       x = "Emotion",
+       y = "Mean Score")
+
+ggsave("mean_sentiment.pdf", plot = last_plot(), width = 8, height = 6)
+
+```
+
+```{r}
+ggplot(emotion_results_df, aes(x = label, y = score, fill = label)) +
+  scale_fill_brewer(palette = "Set3") +
+  geom_boxplot(show.legend = FALSE) +
+  theme_minimal() +
+  labs(title = "Emotion Score Distribution",
+       x = "Emotion",
+       y = "Score")
+
+
+ggsave("boxplot.pdf", plot = last_plot(), width = 8, height = 6)
+```
+
+
+```{r}
+
+# compute counts
+counts_df <- emotion_results_df %>%
+  count(label)
+
+max_score <- max(emotion_results_df$score)
+max_count <- max(counts_df$n)
+
+# scale counts to overlay on score axis
+counts_df$scaled_n <- counts_df$n / max_count * max_score
+
+ggplot(emotion_results_df, aes(x = label, y = score, fill = label)) +
+  geom_boxplot(show.legend = FALSE, alpha = 0.7) +
+  scale_fill_brewer(palette = "Set3") +
+
+  # add count line (scaled)
+  geom_line(data = counts_df,
+            aes(x = label, y = scaled_n, group = 1),
+            color = "steelblue", size = 1.2) +
+  geom_point(data = counts_df,
+             aes(x = label, y = scaled_n),
+             color = "steelblue", size = 3) +
+
+  # secondary axis
+  scale_y_continuous(
+    name = "Emotion Score",
+    sec.axis = sec_axis(
+      ~ . / max_score * max_count,
+      name = "Post Count",
+      labels = scales::comma
+    )
+  ) +
+
+  theme_minimal(base_size = 14) +
+  labs(title = "Emotion Scores with Post Counts (Line)",
+       x = "Emotion",
+       y = "Emotion Score")
+
+
+
+ggsave("count_score_sentiment.pdf", plot = last_plot(), width = 8, height = 6)
+
+```
+
+
+
